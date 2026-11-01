@@ -12,7 +12,7 @@ from yt_dlp.cookies import CookieLoadError
 from yt_dlp.utils import DownloadError, sanitize_filename
 
 from . import __version__, prompts
-from .browsers import BROWSER_HINTS, detect_browsers, unsupported_installed
+from .browsers import BROWSER_HINTS, detect_browsers, diagnose, unsupported_installed
 from .downloader import AUDIO_FORMATS, AUDIO_QUALITIES, VIDEO_CONTAINERS, Downloader
 from .output import Segment, to_simplified, write_markdown, write_srt
 from .subtitles import Track, original_language, parse_vtt, pick_track
@@ -122,8 +122,11 @@ def auto_browser() -> str | None:
 
 def recover_cookies(dl: Downloader, args: argparse.Namespace) -> Downloader | None:
     """After a CookieLoadError: let the user pick another source and retry."""
+    findings = diagnose(dl.browser)
+    for line in findings:
+        print(f"  > {line}")
     hint = BROWSER_HINTS.get((dl.browser or "").split(":")[0])
-    if hint:
+    if hint and not findings:
         print(f"  {hint}")
     if prompts.ASSUME_DEFAULTS:
         return None

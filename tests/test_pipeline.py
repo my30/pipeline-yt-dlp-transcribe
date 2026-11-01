@@ -207,3 +207,35 @@ def test_detect_browsers_runs():
     from ytpipe.browsers import detect_browsers
 
     assert isinstance(detect_browsers(), list)
+
+
+def _fake_mac_chrome(monkeypatch, root):
+    from ytpipe import browsers
+
+    monkeypatch.setattr(browsers.sys, "platform", "darwin")
+    monkeypatch.setitem(browsers._PATHS["darwin"], "chrome", [str(root)])
+    return browsers
+
+
+def test_diagnose_lists_profiles(monkeypatch, tmp_path):
+    (tmp_path / "Default" / "Network").mkdir(parents=True)
+    (tmp_path / "Default" / "Network" / "Cookies").write_bytes(b"")
+    (tmp_path / "Profile 2").mkdir()
+    (tmp_path / "Profile 2" / "Cookies").write_bytes(b"")
+    out = " ".join(_fake_mac_chrome(monkeypatch, tmp_path).diagnose("chrome"))
+    assert "Default, Profile 2" in out and '--browser "chrome:Profile 2"' in out
+
+
+def test_diagnose_permission_denied(monkeypatch, tmp_path):
+    browsers = _fake_mac_chrome(monkeypatch, tmp_path)
+
+    def deny(self):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(browsers.Path, "iterdir", deny)
+    assert "Full Disk Access" in " ".join(browsers.diagnose("chrome"))
+
+
+def test_diagnose_missing_dir(monkeypatch, tmp_path):
+    out = _fake_mac_chrome(monkeypatch, tmp_path / "nope").diagnose("chrome")
+    assert "does not exist" in out[0]
