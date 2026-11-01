@@ -16,7 +16,7 @@ from .browsers import BROWSER_HINTS, detect_browsers, diagnose, unsupported_inst
 from .downloader import AUDIO_FORMATS, AUDIO_QUALITIES, VIDEO_CONTAINERS, Downloader
 from .output import Segment, to_simplified, write_markdown, write_srt
 from .subtitles import Track, original_language, parse_vtt, pick_track
-from .transcribe import BACKENDS, default_backend, default_model, installed, transcribe
+from .transcribe import BACKENDS, WHISPER_SIZES, default_model, installed, recommendations, transcribe
 
 DEFAULT_DIR = "~/Downloads/yt-dlp"
 MODES = [
@@ -36,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "'auto' (default) detects installed browsers; or yt-dlp syntax e.g. safari, firefox, brave, "
                         "'chrome:Profile 1'; 'none' to disable.")
     p.add_argument("--cookies", help="Use a Netscape cookies.txt file instead of --browser.")
-    p.add_argument("--lang", default="zh", help="Spoken language: zh, en, ja, ... or 'auto' (default zh).")
+    p.add_argument("--lang", help="Spoken language: en, zh, ja, ... or 'auto'. Default: ask (1=en, 2=zh).")
     p.add_argument("--backend", choices=list(BACKENDS), help="ASR backend (default: best installed for this machine).")
     p.add_argument("--model", help="ASR model name / HF repo (backend specific).")
     p.add_argument("--subs", choices=["ask", "prefer", "never"], default="ask",
@@ -179,21 +179,12 @@ def process(url: str, dl: Downloader, args: argparse.Namespace) -> None:
     # ---- transcription choices
     track: Track | None = None
     backend = model = None
-    lang = args.lang
+    lang = args.lang or "zh"
     if mode in ("transcribe", "both"):
-        orig = original_language(info)
-        if orig and args.lang != "auto" and not orig.startswith(args.lang.split("-")[0]):
-            print(f"\nNote: YouTube reports the spoken language as '{orig}', you asked for '{args.lang}'.")
-        lang = prompts.ask("Spoken language (zh/en/ja/... or auto)", args.lang)
+        lang = args.lang or choose_language(info)
         track = choose_subtitle_track(info, lang, args.subs)
         if track is None:
-            backend = args.backend or default_backend()
-            if not args.backend and not args.yes:
-                opts = [(b, f"{b}{'' if installed(b) else '  (not installed)'}") for b in BACKENDS]
-                backend = prompts.choose("ASR backend?", opts, backend)
-            model = args.model or default_model(backend)
-            if not installed(backend):
-                raise RuntimeError(f"Backend '{backend}' not installed. Run: {BACKENDS[backend][2]}")
+            backend, model = choose_asr(lang, args)
 
     outdir = Path(args.dir or prompts.ask("\nSave to directory", DEFAULT_DIR)).expanduser().resolve()
     outdir.mkdir(parents=True, exist_ok=True)
@@ -226,6 +217,40 @@ def process(url: str, dl: Downloader, args: argparse.Namespace) -> None:
     print(f"\nTranscript: {md}")
     if any(s.end > 0 for s in segments):
         print(f"Subtitles:  {write_srt(segments, outdir / f'{stem}.srt')}")
+
+
+LANGS = [("en", "English"), ("zh", "中文 (普通话)"), ("auto", "Auto-detect")]
+
+
+def choose_language(info: dict) -> str:
+    orig = (original_language(info) or "").split("-")[0].lower()
+    default = orig if orig in ("en", "zh") else ("auto" if orig else "zh")
+    if orig:
+        print(f"\nYouTube reports the spoken language as '{original_language(info)}'.")
+    return prompts.choose("Spoken language?", LANGS, default,
+                          free_text="or type a code: ja, ko, yue (粤语), fr, de, ...").strip().lower()
+
+
+def choose_asr(lang: str, args: argparse.Namespace) -> tuple[str, str]:
+    ranked = recommendations(lang)
+    if args.backend:
+        backend = args.backend
+    else:
+        default = next((b for b, _ in ranked if installed(b)), ranked[0][0])
+        opts = []
+        for b, note in ranked:
+            missing = "" if installed(b) else f"   [not installed: {BACKENDS[b][2]}]"
+            opts.append((b, f"{b:<18} {note}{missing}"))
+        backend = prompts.choose(f"\nTranscription engine for '{lang}'?", opts, default)
+    if not installed(backend):
+        raise RuntimeError(f"Backend '{backend}' not installed. Run: {BACKENDS[backend][2]}")
+    if args.model:
+        return backend, args.model
+    if backend in WHISPER_SIZES:
+        sizes = WHISPER_SIZES[backend]
+        default = sizes[1][0] if lang.startswith("yue") else sizes[0][0]
+        return backend, prompts.choose("Whisper model size?", sizes, default)
+    return backend, default_model(backend)
 
 
 def choose_subtitle_track(info: dict, lang: str, policy: str) -> Track | None:

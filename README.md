@@ -56,12 +56,18 @@ If loading cookies fails you get a menu: retry, another browser, a `cookies.txt`
 
 ## ASR backends
 
-| backend | best for | notes |
-|---|---|---|
-| `mlx-whisper` (default on M-series) | multilingual, good all-rounder | `whisper-large-v3-turbo` on Metal; anti-hallucination settings on |
-| `faster-whisper` | non-Mac / CUDA | Silero VAD filter on |
-| `funasr-paraformer` | Mandarin | natural punctuation, sentence timestamps, fewer hallucinations on silence |
-| `funasr-sensevoice` | very fast zh/yue/en/ja/ko | no timestamps → no .srt |
+The engine menu is ranked for the spoken language you pick (1 = en, 2 = zh, 3 = auto, or type a code).
+Engines that aren't installed are shown with their install command.
+
+| language | recommended order |
+|---|---|
+| zh (普通话) | `funasr-paraformer` ★ → `mlx-whisper` (better for heavy 中英混杂) → `funasr-sensevoice` (fastest, no .srt) |
+| yue (粤语) | `funasr-sensevoice` ★ → `mlx-whisper` large-v3 |
+| en | `mlx-whisper` ★ → `faster-whisper` → `funasr-sensevoice` |
+| others / auto | `mlx-whisper` ★ (~100 languages) |
+
+Whisper models: `large-v3-turbo` (default, fast) / `large-v3` (most accurate) / `small` (drafts).
+On non-Apple machines `faster-whisper` replaces `mlx-whisper`.
 
 ## Tests
 

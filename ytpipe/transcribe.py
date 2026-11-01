@@ -49,6 +49,58 @@ def default_model(backend: str) -> str:
     return BACKENDS[backend][1]
 
 
+# Per spoken language: backends best-first, with a one-line reason. Backends missing from a
+# language's list are unsuitable for it (e.g. Paraformer-zh on English audio).
+_WHISPER_NOTE = "Whisper large-v3-turbo: strong all-rounder, handles 中英混杂 well"
+RECOMMEND = {
+    "zh": [
+        ("funasr-paraformer", "★ 普通话首选: lowest error rate on Mandarin benchmarks, natural punctuation, rarely hallucinates, timestamps"),
+        ("mlx-whisper", "Good alternative; better when lots of English is mixed in. Fast on Apple Silicon"),
+        ("funasr-sensevoice", "Fastest (minutes-long audio in seconds); also Cantonese; no timestamps/.srt"),
+        ("faster-whisper", "Same quality as mlx-whisper but CPU-only on a Mac -> much slower"),
+    ],
+    "yue": [
+        ("funasr-sensevoice", "★ Best for Cantonese (粤语); no timestamps"),
+        ("mlx-whisper", "Usable; pick large-v3 (turbo is weaker on Cantonese)"),
+        ("faster-whisper", "Same as mlx-whisper, slower on Mac"),
+    ],
+    "en": [
+        ("mlx-whisper", "★ Best for English on Apple Silicon"),
+        ("faster-whisper", "Same model family; use on non-Mac / NVIDIA"),
+        ("funasr-sensevoice", "Fast but less accurate than Whisper on English; no timestamps"),
+    ],
+}
+_DEFAULT_RECOMMEND = [
+    ("mlx-whisper", "★ " + _WHISPER_NOTE + "; ~100 languages"),
+    ("faster-whisper", "Same model family; use on non-Mac / NVIDIA"),
+    ("funasr-sensevoice", "Only zh/yue/en/ja/ko; very fast; no timestamps"),
+]
+
+WHISPER_SIZES = {
+    "mlx-whisper": [
+        ("mlx-community/whisper-large-v3-turbo", "large-v3-turbo - ★ several times faster than large-v3, close accuracy for zh/en"),
+        ("mlx-community/whisper-large-v3-mlx", "large-v3 - most accurate, slower; prefer for Cantonese / noisy audio"),
+        ("mlx-community/whisper-small-mlx", "small - quick drafts only, noticeably more 错别字"),
+    ],
+    "faster-whisper": [
+        ("large-v3-turbo", "large-v3-turbo - ★ best speed/accuracy trade-off"),
+        ("large-v3", "large-v3 - most accurate, slower"),
+        ("small", "small - quick drafts only"),
+    ],
+}
+
+
+def recommendations(language: str | None) -> list[tuple[str, str]]:
+    """Backends ranked for this language. On non-Apple machines mlx-whisper is dropped."""
+    base = (language or "auto").split("-")[0].lower()
+    ranked = RECOMMEND.get(base, _DEFAULT_RECOMMEND)
+    if not is_apple_silicon():
+        ranked = [r for r in ranked if r[0] != "mlx-whisper"]
+        if not any(b == "faster-whisper" for b, _ in ranked):
+            ranked.append(("faster-whisper", _WHISPER_NOTE))
+    return ranked
+
+
 def transcribe(path: Path, backend: str, model: str | None = None, language: str | None = "zh") -> list[Segment]:
     if not installed(backend):
         raise RuntimeError(f"Backend '{backend}' is not installed. Run: {BACKENDS[backend][2]}")

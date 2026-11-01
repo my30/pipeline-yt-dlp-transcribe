@@ -21,8 +21,12 @@ def ask(question: str, default: str | None = None) -> str:
             return default
 
 
-def choose(question: str, options: Sequence[tuple[str, str]], default: str | None = None) -> str:
-    """Numbered menu. ``options`` is a list of (value, label); returns the chosen value."""
+def choose(question: str, options: Sequence[tuple[str, str]], default: str | None = None,
+           free_text: str | None = None) -> str:
+    """Numbered menu. ``options`` is a list of (value, label); returns the chosen value.
+
+    If ``free_text`` is set (a hint shown under the menu), any other non-numeric input is returned as-is.
+    """
     values = [v for v, _ in options]
     default = default if default in values else values[0]
     if ASSUME_DEFAULTS:
@@ -32,6 +36,8 @@ def choose(question: str, options: Sequence[tuple[str, str]], default: str | Non
     for i, (value, label) in enumerate(options, 1):
         mark = " (default)" if value == default else ""
         print(f"  {i}) {label}{mark}")
+    if free_text:
+        print(f"     {free_text}")
     while True:
         raw = input(f"Select 1-{len(options)} [{values.index(default) + 1}]: ").strip()
         if not raw:
@@ -39,6 +45,8 @@ def choose(question: str, options: Sequence[tuple[str, str]], default: str | Non
         if raw.isdigit() and 1 <= int(raw) <= len(options):
             return values[int(raw) - 1]
         if raw in values:
+            return raw
+        if free_text and not raw.isdigit():
             return raw
         print("  Invalid choice, try again.")
 

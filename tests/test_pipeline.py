@@ -239,3 +239,34 @@ def test_diagnose_permission_denied(monkeypatch, tmp_path):
 def test_diagnose_missing_dir(monkeypatch, tmp_path):
     out = _fake_mac_chrome(monkeypatch, tmp_path / "nope").diagnose("chrome")
     assert "does not exist" in out[0]
+
+
+def test_language_shortcuts(monkeypatch):
+    for answer, want in [("1", "en"), ("2", "zh"), ("3", "auto"), ("ja", "ja"), ("YUE", "yue"), ("", "en")]:
+        monkeypatch.setattr("builtins.input", lambda *_: answer)
+        prompts.ASSUME_DEFAULTS = False
+        assert cli.choose_language(_info(auto={"en-orig": [1]})) == want
+
+
+def test_recommendations(monkeypatch):
+    from ytpipe import transcribe as tr
+
+    monkeypatch.setattr(tr, "is_apple_silicon", lambda: True)
+    assert tr.recommendations("zh")[0][0] == "funasr-paraformer"
+    assert tr.recommendations("en")[0][0] == "mlx-whisper"
+    assert "funasr-paraformer" not in [b for b, _ in tr.recommendations("en")]
+    assert tr.recommendations("ja")[0][0] == "mlx-whisper"
+    monkeypatch.setattr(tr, "is_apple_silicon", lambda: False)
+    assert "mlx-whisper" not in [b for b, _ in tr.recommendations("ja")]
+
+
+def test_choose_asr_defaults_to_installed_recommendation(monkeypatch):
+    import argparse
+    from ytpipe import transcribe as tr
+
+    monkeypatch.setattr(tr, "is_apple_silicon", lambda: True)
+    monkeypatch.setattr(cli, "installed", lambda b: b == "mlx-whisper")  # FunASR not installed
+    monkeypatch.setattr("builtins.input", lambda *_: "")
+    prompts.ASSUME_DEFAULTS = False
+    args = argparse.Namespace(backend=None, model=None)
+    assert cli.choose_asr("zh", args) == ("mlx-whisper", "mlx-community/whisper-large-v3-turbo")
