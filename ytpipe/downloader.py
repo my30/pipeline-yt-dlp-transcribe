@@ -39,6 +39,9 @@ VIDEO_CONTAINERS = {
 
 class Downloader:
     def __init__(self, browser: str | None = "chrome", cookies_file: str | None = None, extra_args: list[str] | None = None):
+        self.browser = None if cookies_file else browser
+        self.cookies_file = cookies_file
+        self.cookie_source = f"cookies file {cookies_file}" if cookies_file else (f"browser '{browser}'" if browser else "no cookies")
         base = ["--no-playlist"]
         if cookies_file:
             base += ["--cookies", cookies_file]

@@ -8,9 +8,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+from yt_dlp.cookies import CookieLoadError
 from yt_dlp.utils import DownloadError, sanitize_filename
 
 from . import __version__, prompts
+from .browsers import BROWSER_HINTS, detect_browsers, unsupported_installed
 from .downloader import AUDIO_FORMATS, AUDIO_QUALITIES, VIDEO_CONTAINERS, Downloader
 from .output import Segment, to_simplified, write_markdown, write_srt
 from .subtitles import Track, original_language, parse_vtt, pick_track
@@ -29,9 +31,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("url", nargs="*", help="YouTube URL(s). Omit to be prompted (loop until 'q').")
     p.add_argument("--mode", choices=[m for m, _ in MODES], help="Skip the mode question.")
     p.add_argument("-d", "--dir", help=f"Output directory (default {DEFAULT_DIR}).")
-    p.add_argument("--browser", default="chrome",
-                   help="Browser to read YouTube login cookies from, yt-dlp syntax e.g. chrome, 'chrome:Profile 1', safari, firefox. "
-                        "'none' to disable. Needed for members-only videos.")
+    p.add_argument("--browser", default="auto",
+                   help="Browser to read YouTube login cookies from (needed for members-only videos). "
+                        "'auto' (default) detects installed browsers; or yt-dlp syntax e.g. safari, firefox, brave, "
+                        "'chrome:Profile 1'; 'none' to disable.")
     p.add_argument("--cookies", help="Use a Netscape cookies.txt file instead of --browser.")
     p.add_argument("--lang", default="zh", help="Spoken language: zh, en, ja, ... or 'auto' (default zh).")
     p.add_argument("--backend", choices=list(BACKENDS), help="ASR backend (default: best installed for this machine).")
@@ -54,7 +57,12 @@ def main(argv: list[str] | None = None) -> int:
     if not shutil.which("deno"):
         print("NOTE: deno not found. Recent yt-dlp needs a JS runtime for YouTube. Install: brew install deno")
 
-    browser = None if (args.browser or "").lower() == "none" else args.browser
+    if args.cookies:
+        browser = None
+    elif (args.browser or "").lower() == "auto":
+        browser = auto_browser()
+    else:
+        browser = None if (args.browser or "").lower() == "none" else args.browser
     dl = Downloader(browser=browser, cookies_file=args.cookies, extra_args=args.yt_dlp_arg)
 
     urls = list(args.url)
@@ -73,16 +81,65 @@ def main(argv: list[str] | None = None) -> int:
         else:
             return 0
         try:
-            process(url, dl, args)
+            while True:
+                try:
+                    process(url, dl, args)
+                    break
+                except CookieLoadError as e:
+                    print(f"\nCould not load cookies from {dl.cookie_source}: {e}")
+                    new = recover_cookies(dl, args)
+                    if new is None:
+                        break
+                    dl = new
         except KeyboardInterrupt:
             print("\nCancelled.")
         except DownloadError as e:
             print(f"\nyt-dlp error: {e}")
             if "members" in str(e).lower() or "sign in" in str(e).lower() or "join this channel" in str(e).lower():
-                print("Hint: be logged in to YouTube in the browser given by --browser (currently "
-                      f"{browser!r}); on macOS allow the Keychain prompt ('Always Allow').")
+                print(f"Hint: log in to YouTube (with the member account) in the browser used for cookies "
+                      f"(currently {dl.cookie_source}), or restart with --browser <name> / --cookies cookies.txt.")
         except Exception as e:  # keep the loop alive for the next URL
             print(f"\nError: {type(e).__name__}: {e}")
+
+
+# ---------------------------------------------------------------------------- cookies
+
+def auto_browser() -> str | None:
+    found = detect_browsers()
+    for name in unsupported_installed():
+        print(f"NOTE: {name} is installed but yt-dlp cannot read its cookies; "
+              "export a cookies.txt from it and use --cookies (see README).")
+    if not found:
+        print("NOTE: no supported browser found - continuing without cookies (public videos only).")
+        return None
+    if len(found) == 1:
+        print(f"Using cookies from {found[0]}.")
+        return found[0]
+    pick = prompts.choose("Which browser are you logged in to YouTube with?",
+                          [(b, b) for b in found] + [("none", "No cookies (public videos only)")], found[0])
+    return None if pick == "none" else pick
+
+
+def recover_cookies(dl: Downloader, args: argparse.Namespace) -> Downloader | None:
+    """After a CookieLoadError: let the user pick another source and retry."""
+    hint = BROWSER_HINTS.get((dl.browser or "").split(":")[0])
+    if hint:
+        print(f"  {hint}")
+    if prompts.ASSUME_DEFAULTS:
+        return None
+    others = [b for b in detect_browsers() if b != dl.browser]
+    opts = ([("retry", f"Retry {dl.cookie_source} (after fixing permissions)")] if dl.browser else []) \
+        + [(b, f"Use {b}") for b in others] \
+        + [("file", "Use a cookies.txt file"), ("none", "Continue without cookies (public videos only)"), ("skip", "Skip this URL")]
+    pick = prompts.choose("How should I get YouTube cookies?", opts, opts[0][0])
+    if pick == "skip":
+        return None
+    if pick == "retry":
+        return Downloader(browser=dl.browser, extra_args=args.yt_dlp_arg)
+    if pick == "file":
+        path = Path(prompts.ask("Path to cookies.txt")).expanduser()
+        return Downloader(browser=None, cookies_file=str(path), extra_args=args.yt_dlp_arg)
+    return Downloader(browser=None if pick == "none" else pick, extra_args=args.yt_dlp_arg)
 
 
 # ---------------------------------------------------------------------------- one URL

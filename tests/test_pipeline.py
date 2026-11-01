@@ -170,3 +170,40 @@ def test_parse_vtt_with_space_only_lines():
     vtt = ROLLING_VTT.replace("0%\n\n大家好<", "0%\n \n大家好<").replace("跃迁\n\n\n", "跃迁\n \n\n")
     assert " \n" in vtt
     assert [s.text for s in parse_vtt(vtt)] == ["大家好今天我们", "聊聊量子跃迁", "这个&话题"]
+
+
+def test_cookie_failure_offers_other_browser(monkeypatch, tmp_path):
+    from yt_dlp.cookies import CookieLoadError
+
+    made = []
+
+    class D:
+        available_heights = staticmethod(lambda i: [])
+
+        def __init__(self, browser=None, cookies_file=None, extra_args=None):
+            self.browser, self.cookie_source = browser, f"browser '{browser}'"
+            self.calls = []
+            made.append(self)
+
+        def fetch_info(self, url):
+            if self.browser == "chrome":
+                raise CookieLoadError("could not find chrome cookies database")
+            return _info(subs={"zh-Hans": [1]})
+
+        download_subtitle = FakeDL.download_subtitle
+
+    monkeypatch.setattr(cli, "Downloader", D)
+    monkeypatch.setattr(cli, "detect_browsers", lambda: ["chrome", "safari"])
+    # recovery menu: 1 retry chrome, 2 safari, ... -> "2"; then mode 2, lang default, use subs
+    it = iter(["2", "2", "", "y"])
+    monkeypatch.setattr("builtins.input", lambda *_: next(it))
+    prompts.ASSUME_DEFAULTS = False
+    assert cli.main(["--browser", "chrome", "--dir", str(tmp_path), "https://youtu.be/abc123"]) == 0
+    assert [d.browser for d in made] == ["chrome", "safari"]
+    assert (tmp_path / "T [abc123].md").exists()
+
+
+def test_detect_browsers_runs():
+    from ytpipe.browsers import detect_browsers
+
+    assert isinstance(detect_browsers(), list)

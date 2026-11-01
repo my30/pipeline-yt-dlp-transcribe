@@ -43,6 +43,17 @@ ytpipe --browser "chrome:Profile 1" ...      # a non-default Chrome profile
 ytpipe --browser safari ...                  # needs Full Disk Access for the terminal
 ```
 
+## Cookies / members-only videos
+
+`--browser auto` (default) detects installed browsers and asks which one you are logged in with.
+If loading cookies fails you get a menu: retry, another browser, a `cookies.txt` file, or no cookies.
+
+- **Safari**: System Settings → Privacy & Security → Full Disk Access → enable your terminal app (Terminal/iTerm/VS Code), then restart it.
+- **Chrome/Brave/Edge**: click "Always Allow" on the Keychain prompt. Non-default profile: `--browser "chrome:Profile 1"`.
+- **Firefox**: works without extra permissions.
+- **Arc / Orion / others**: yt-dlp can't read them. Export with a "Get cookies.txt LOCALLY" extension while on youtube.com, then `--cookies ~/yt-cookies.txt`.
+  Treat that file like a password. YouTube rotates cookies, so export from a private window that you then close, or re-export when it stops working.
+
 ## ASR backends
 
 | backend | best for | notes |
