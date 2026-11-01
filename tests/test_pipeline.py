@@ -368,3 +368,43 @@ def test_custom_template_keeps_obsidian_syntax():
 def test_missing_template_fails_fast(tmp_path):
     with pytest.raises(FileNotFoundError):
         cli.main(["--md-template", str(tmp_path / "nope.md"), "https://youtu.be/x"])
+
+
+def test_clipper_inbox_template_matches_web_clipper_properties():
+    import re
+    import yaml
+
+    tpl = (Path(cli.__file__).parent / "templates" / "clipper-inbox.md").read_text()
+    info = {**_INFO, "description": "第一行: 介绍\n\n第二行 #tag " + "长" * 300}
+    md = render_markdown(_SEGS, info, "src", template=tpl)
+    fm = yaml.safe_load(re.match(r"---\n(.*?)\n---\n", md, re.S).group(1))
+    assert list(fm) == ["Title", "Source", "Author", "Published", "Created", "Description", "tags"]
+    assert fm["Title"] == _INFO["title"] and fm["Source"] == "https://youtu.be/abc"
+    assert fm["Author"] == ["[[$HOME Channel]]"] and str(fm["Published"]) == "2026-01-02"
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d", str(fm["Created"]).replace(" ", "T"))
+    assert fm["Description"].startswith("第一行: 介绍 第二行 #tag") and fm["Description"].endswith("…")
+    assert fm["tags"] == ["raw", "clipping"] and "## Transcript" in md
+
+
+def test_builtin_template_by_name_and_md_dir_naming(tmp_path):
+    args = cli.build_parser().parse_args(["--md-template", "clipper-inbox", "--md-dir", str(tmp_path / "Inbox"),
+                                          "--md-name", "title"])
+    assert cli.load_template(args).startswith("---\nTitle:")
+    info = {"id": "abc", "title": "A/B: #1 [x]"}
+    p = cli.transcript_path(info, "stem", tmp_path, args)
+    assert p.parent == tmp_path / "Inbox" and not set("#[]|^") & set(p.stem)
+    p.write_text("other note")  # name taken by an unrelated note -> fall back to the id stem
+    assert cli.transcript_path(info, "stem", tmp_path, args).name == "stem.md"
+    p.write_text("url: https://youtu.be/abc")  # same video re-run -> overwrite
+    assert cli.transcript_path(info, "stem", tmp_path, args) == p
+
+
+def test_config_file_sets_defaults_cli_wins(tmp_path):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('md-template = "clipper-inbox"\nmd_dir = "~/Vault/00-Inbox"\nmd-name = "title"\n'
+                   'frontmatter = "bogus"\nnot_an_option = 1\n')
+    parser = cli.build_parser()
+    loaded = cli.load_config(parser, cfg)
+    assert loaded == {"md_template": "clipper-inbox", "md_dir": "~/Vault/00-Inbox", "md_name": "title"}
+    args = parser.parse_intermixed_args(["--md-name", "title-id", "https://x"])
+    assert args.md_name == "title-id" and args.md_dir == "~/Vault/00-Inbox" and args.frontmatter == "suggest"

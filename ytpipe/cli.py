@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -20,7 +21,10 @@ from .subtitles import Track, original_language, parse_vtt, pick_track
 from .transcribe import BACKENDS, WHISPER_SIZES, default_model, installed, recommendations, transcribe
 
 DEFAULT_DIR = "~/Downloads/yt-dlp"
-USER_TEMPLATE = Path("~/.config/ytpipe/template.md").expanduser()
+CONFIG_DIR = Path("~/.config/ytpipe").expanduser()
+USER_TEMPLATE = CONFIG_DIR / "template.md"
+CONFIG_FILE = CONFIG_DIR / "config.toml"
+BUILTIN_TEMPLATES = Path(__file__).parent / "templates"
 MODES = [
     ("download", "Download only (audio or video)"),
     ("transcribe", "Transcribe only (temporary audio is deleted afterwards)"),
@@ -48,8 +52,14 @@ def build_parser() -> argparse.ArgumentParser:
     md.add_argument("--frontmatter", choices=["suggest", "yaml", "none"], default="suggest",
                     help="suggest (default): generic Markdown + an Obsidian frontmatter code block to copy; "
                          "yaml: real frontmatter at the top; none.")
-    md.add_argument("--md-template", metavar="FILE",
-                    help=f"Your own Markdown template (default: {USER_TEMPLATE} if it exists). See --print-template.")
+    md.add_argument("--md-template", metavar="FILE|NAME",
+                    help=f"Your own Markdown template file, or a built-in name ({', '.join(builtin_templates())}). "
+                         f"Default: {USER_TEMPLATE} if it exists. See --print-template.")
+    md.add_argument("--md-dir", metavar="DIR",
+                    help="Write the .md transcript here (e.g. your vault's inbox) instead of next to the media.")
+    md.add_argument("--md-name", choices=["title-id", "title"], default="title-id",
+                    help="Transcript file name: 'Title [id].md' (default) or 'Title.md' like Web Clipper "
+                         "(falls back to adding [id] if that name is taken).")
     md.add_argument("--print-template", action="store_true",
                     help="Print the built-in template and its placeholders, then exit.")
     p.add_argument("-y", "--yes", action="store_true", help="Accept every default without prompting.")
@@ -65,12 +75,44 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def load_config(parser: argparse.ArgumentParser, path: Path = CONFIG_FILE) -> dict:
+    """~/.config/ytpipe/config.toml: keys are long option names (dashes or underscores), CLI wins."""
+    if not path.is_file():
+        return {}
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10
+        try:
+            import tomli as tomllib  # type: ignore
+        except ImportError:
+            print(f"NOTE: ignoring {path} (needs Python 3.11+ or `pip install tomli`)")
+            return {}
+    with path.open("rb") as f:
+        raw = tomllib.load(f)
+    known = {a.dest: a for a in parser._actions}
+    cfg = {}
+    for key, value in raw.items():
+        dest = key.replace("-", "_")
+        action = known.get(dest)
+        if action is None or dest in ("url", "help", "version", "update", "resume_url", "print_template"):
+            print(f"NOTE: unknown key '{key}' in {path}, ignored")
+            continue
+        if action.choices and value not in action.choices:
+            print(f"NOTE: '{key} = {value!r}' in {path} must be one of {list(action.choices)}, ignored")
+            continue
+        cfg[dest] = value
+    parser.set_defaults(**cfg)
+    return cfg
+
+
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    args = build_parser().parse_intermixed_args(raw_argv)
+    parser = build_parser()
+    load_config(parser)
+    args = parser.parse_intermixed_args(raw_argv)
     prompts.ASSUME_DEFAULTS = args.yes
     if args.print_template:
-        print(DEFAULT_TEMPLATE)
+        print(load_template(args) or DEFAULT_TEMPLATE)
         print("<!--\n" + TEMPLATE_HELP + "\n-->")
         return 0
     load_template(args)  # fail now, not after a 20-minute transcription
@@ -299,7 +341,7 @@ def process(url: str, dl: Downloader, args: argparse.Namespace) -> None:
         if not converted and track is None:
             print("Tip: pip install opencc-python-reimplemented  to force Simplified Chinese output.")
 
-    md = write_markdown(segments, info, source, outdir / f"{stem}.md", language=lang,
+    md = write_markdown(segments, info, source, transcript_path(info, stem, outdir, args), language=lang,
                         timestamps=not args.no_timestamps, template=load_template(args),
                         frontmatter=args.frontmatter)
     print(f"\nTranscript: {md}")
@@ -341,8 +383,27 @@ def choose_asr(lang: str, args: argparse.Namespace) -> tuple[str, str]:
     return backend, default_model(backend)
 
 
+def transcript_path(info: dict, stem: str, outdir: Path, args: argparse.Namespace) -> Path:
+    folder = Path(args.md_dir).expanduser() if args.md_dir else outdir
+    folder.mkdir(parents=True, exist_ok=True)
+    if args.md_name == "title":
+        # Obsidian can't link to names containing # ^ [ ] |  (Web Clipper strips them as well)
+        name = re.sub(r"[#^\[\]|]", "", sanitize_filename(info.get("title") or info["id"])).strip()[:150] or info["id"]
+        target = folder / f"{name}.md"
+        # Free, or a previous transcript of this same video (re-run) -> use it; else disambiguate.
+        if not target.exists() or info["id"] in target.read_text(encoding="utf-8", errors="ignore"):
+            return target
+    return folder / f"{stem}.md"
+
+
+def builtin_templates() -> list[str]:
+    return sorted(p.stem for p in BUILTIN_TEMPLATES.glob("*.md"))
+
+
 def load_template(args: argparse.Namespace) -> str | None:
     path = Path(args.md_template).expanduser() if args.md_template else USER_TEMPLATE
+    if args.md_template and not path.is_file() and (BUILTIN_TEMPLATES / f"{args.md_template}.md").is_file():
+        path = BUILTIN_TEMPLATES / f"{args.md_template}.md"
     if path.is_file():
         return path.read_text(encoding="utf-8")
     if args.md_template:

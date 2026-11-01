@@ -81,7 +81,10 @@ ${frontmatter_suggestion}
 
 TEMPLATE_HELP = """Placeholders (string.Template syntax, unknown ones are left untouched):
   ${title} ${channel} ${channel_url} ${url} ${id} ${upload_date} ${duration} ${duration_seconds}
-  ${source} ${language} ${created} ${tags} ${description}
+  ${source} ${language} ${created} ${created_datetime} ${tags} ${description} ${description_short}
+  ${author} ${author_wikilink}  (author = channel name; wikilink = [[Channel]])
+  ${KEY_q}                    any of the above as a quoted, YAML-safe value - use these inside frontmatter,
+                              e.g.  Title: ${title_q}   (titles with ':' or '#' would otherwise break YAML)
   ${transcript}               the paragraphs (with [hh:mm:ss] stamps unless --no-timestamps)
   ${metadata_table}           the Channel/URL/... table from the default template
   ${frontmatter_yaml}         a ready '---' YAML block (values safely quoted)
@@ -117,9 +120,35 @@ def metadata(info: dict, source: str, language: str | None = None) -> dict:
         "source": source,
         "language": language or "",
         "created": _dt.date.today().isoformat(),
+        "created_datetime": _dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),  # local time, like Web Clipper
+        "author": info.get("channel") or info.get("uploader") or "",
+        "author_wikilink": _wikilink(info.get("channel") or info.get("uploader") or ""),
         "tags": ", ".join(info.get("tags") or []),
         "description": (info.get("description") or "").strip(),
+        "description_short": _short(info.get("description") or ""),
     }
+
+
+def _wikilink(name: str) -> str:
+    # Obsidian link targets can't contain these; Web Clipper strips them too.
+    clean = re.sub(r"[\[\]|#^]", "", name).strip()
+    return f"[[{clean}]]" if clean else ""
+
+
+def _short(text: str, limit: int = 200) -> str:
+    """One-line summary ~ what a page's meta description holds (YouTube: start of the description)."""
+    one = re.sub(r"\s+", " ", text).strip()
+    return one if len(one) <= limit else one[:limit].rstrip() + "…"
+
+
+_NOT_QUOTED = {"transcript", "metadata_table", "frontmatter_yaml", "frontmatter_suggestion"}
+
+
+def _add_yaml_quoted(meta: dict) -> None:
+    """For every value also offer ${key_q}: the same value as a safe YAML scalar ('' -> "")."""
+    for k, v in list(meta.items()):
+        if k not in _NOT_QUOTED and isinstance(v, str):
+            meta[f"{k}_q"] = _yaml_scalar(v) if v else '""'
 
 
 def frontmatter_yaml(meta: dict) -> str:
@@ -155,6 +184,7 @@ def render_markdown(segments: list[Segment], info: dict, source: str, *, languag
     meta["metadata_table"] = "\n".join(["| | |", "|---|---|", *(f"| {k} | {_cell(v)} |" for k, v in rows)])
     yaml_block = frontmatter_yaml(meta)
     meta["frontmatter_yaml"] = yaml_block if frontmatter != "none" else ""
+    _add_yaml_quoted(meta)
     meta["frontmatter_suggestion"] = (
         f"---\n\n## Suggested frontmatter (Obsidian)\n\nCopy to the very top of the note if you want it:\n\n```yaml\n{yaml_block}\n```"
         if frontmatter == "suggest" else "")

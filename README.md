@@ -49,6 +49,22 @@ that you can copy to the top of a note. Values are quoted so titles with `:` `#`
 ytpipe --print-template > ~/.config/ytpipe/template.md   # then edit
 ```
 
+Built-in `clipper-inbox`: same properties as an Obsidian Web Clipper "Clipping to Inbox" template
+(Title, Source, Author as `[[Channel]]`, Published, Created, Description, tags raw/clipping).
+Inside frontmatter use the `${key_q}` variants (YAML-quoted) so `:` / `#` in titles can't break it.
+
+### Config file
+
+`~/.config/ytpipe/config.toml` sets defaults for any long option (CLI flags still win):
+
+```toml
+md-template = "clipper-inbox"
+md-dir      = "~/Documents/Obsidian/MyVault/00-Inbox"   # transcripts straight into the vault inbox
+md-name     = "title"                                    # 'Title.md' like Web Clipper
+dir         = "~/Downloads/yt-dlp"                       # media / .srt stay here
+browser     = "chrome"
+```
+
 Non-interactive examples:
 
 ```bash

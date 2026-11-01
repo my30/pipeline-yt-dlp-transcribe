@@ -23,3 +23,6 @@ ytpipe = "ytpipe.cli:main"
 
 [tool.setuptools]
 packages = ["ytpipe"]
+
+[tool.setuptools.package-data]
+ytpipe = ["templates/*.md"]
