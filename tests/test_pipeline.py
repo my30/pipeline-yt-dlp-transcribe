@@ -320,7 +320,7 @@ def test_breakage_offers_update_and_restarts(monkeypatch, tmp_path):
     it = iter(["https://youtu.be/abc", "y", "q"])
     monkeypatch.setattr("builtins.input", lambda *_: next(it))
     prompts.ASSUME_DEFAULTS = False
-    assert cli.main(["--browser", "none", "-d", str(tmp_path)]) == 0
+    cli.main(["--browser", "none", "-d", str(tmp_path)])  # real restart would exec; mocked here
     assert restarted["argv"] == ["--browser", "none", "-d", str(tmp_path), "--resume-url", "https://youtu.be/abc"]
 
 
@@ -408,3 +408,121 @@ def test_config_file_sets_defaults_cli_wins(tmp_path):
     assert loaded == {"md_template": "clipper-inbox", "md_dir": "~/Vault/00-Inbox", "md_name": "title"}
     args = parser.parse_intermixed_args(["--md-name", "title-id", "https://x"])
     assert args.md_name == "title-id" and args.md_dir == "~/Vault/00-Inbox" and args.frontmatter == "suggest"
+
+
+def test_fmt_duration():
+    assert cli.fmt_duration(3725) == "1h02m05s" and cli.fmt_duration(605) == "10m05s"
+
+
+# ------------------------------------------------------------------ one-line CLI for agents
+
+def _no_prompts(monkeypatch):
+    def boom(*a):
+        raise AssertionError(f"prompted: {a}")
+    monkeypatch.setattr("builtins.input", boom)
+
+
+def _fake(monkeypatch, info):
+    fake = FakeDL(info)
+    monkeypatch.setattr(cli, "Downloader", type("D", (), {"__new__": lambda cls, **kw: fake,
+                                                          "available_heights": staticmethod(lambda i: [1080, 720])}))
+    monkeypatch.setattr(cli, "installed", lambda b: True)
+    monkeypatch.setattr(cli, "transcribe", lambda *a, **k: [Segment(0, 1, "本地转写")])
+    return fake
+
+
+def test_one_line_video_download_never_prompts(monkeypatch, tmp_path):
+    fake = _fake(monkeypatch, _info())
+    _no_prompts(monkeypatch)
+    rc = cli.main(["--browser", "none", "--mode", "download", "--resolution", "720p", "--video-format", "mkv",
+                   "-d", str(tmp_path), "https://youtu.be/abc123"])
+    assert rc == 0 and fake.calls == [("video", 720, "mkv")]
+
+
+def test_one_line_audio_flags_imply_media(monkeypatch, tmp_path):
+    fake = _fake(monkeypatch, _info())
+    _no_prompts(monkeypatch)
+    cli.main(["--browser", "none", "--mode", "download", "--audio-format", "mp3", "--audio-quality", "192K",
+              "-d", str(tmp_path), "https://youtu.be/abc123"])
+    assert fake.calls == [("audio", "mp3", "192K")]
+
+
+def test_one_line_transcribe_json(monkeypatch, tmp_path, capsys):
+    import json
+
+    fake = _fake(monkeypatch, _info(subs={"zh-Hans": [1]}))
+    _no_prompts(monkeypatch)
+    rc = cli.main(["--browser", "none", "--mode", "transcribe", "--lang", "zh", "--subs", "prefer", "-y",
+                   "--json", "-d", str(tmp_path), "https://youtu.be/abc123"])
+    out, err = capsys.readouterr()
+    doc = json.loads(out)  # stdout must be pure JSON
+    assert rc == 0 and doc["ok"] is True
+    r = doc["results"][0]
+    assert r["status"] == "ok" and r["source"] == "youtube-manual-subs:zh-Hans" and Path(r["transcript"]).exists()
+    assert "Fetching video info" in err and fake.calls == [("subs", "zh-Hans", False)]
+
+
+def test_failure_sets_exit_code_and_json_error(monkeypatch, tmp_path, capsys):
+    import json
+    from yt_dlp.utils import DownloadError
+
+    fake = _fake(monkeypatch, _info())
+    monkeypatch.setattr(fake, "fetch_info", lambda u: (_ for _ in ()).throw(DownloadError("Video unavailable")))
+    rc = cli.main(["--browser", "none", "-y", "--json", "--mode", "download", "https://youtu.be/x"])
+    doc = json.loads(capsys.readouterr().out)
+    assert rc == 1 and doc["ok"] is False and "Video unavailable" in doc["results"][0]["error"]
+
+
+def test_info_prints_decision_data(monkeypatch, capsys):
+    import json
+
+    info = {**_info(subs={"en": [1]}, auto={"zh-Hans-orig": [1], "zh-Hans": [1]}, language="zh-Hans"),
+            "duration": 100, "formats": [{"height": 1080, "vcodec": "avc1", "acodec": "none"},
+                                         {"acodec": "mp4a", "vcodec": "none"}]}
+    _fake(monkeypatch, info)
+    monkeypatch.setattr(cli.Downloader, "available_heights", staticmethod(lambda i: [1080]), raising=False)
+    _no_prompts(monkeypatch)
+    assert cli.main(["--browser", "none", "--info", "https://youtu.be/abc123"]) == 0
+    out = capsys.readouterr().out
+    doc = json.loads(out[out.index("{"):])
+    assert doc["spoken_language"] == "zh-Hans" and doc["manual_subtitles"] == ["en"]
+    assert doc["best_subtitle_track"] == {"key": "zh-Hans-orig", "kind": "auto"} and doc["has_audio"]
+
+
+def test_non_tty_implies_yes(monkeypatch, tmp_path):
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    fake = _fake(monkeypatch, _info())
+    _no_prompts(monkeypatch)
+    assert cli.main(["--browser", "none", "-d", str(tmp_path), "https://youtu.be/abc123"]) == 0
+    assert fake.calls == [("audio", "original", "0")]  # defaults: transcribe mode -> temp audio
+
+
+def test_yes_mode_does_not_update_silently(monkeypatch, tmp_path):
+    from yt_dlp.utils import DownloadError
+    from ytpipe import updater
+
+    fake = _fake(monkeypatch, _info())
+    monkeypatch.setattr(fake, "fetch_info", lambda u: (_ for _ in ()).throw(DownloadError("nsig extraction failed")))
+    monkeypatch.setattr(updater, "update", lambda *a: (_ for _ in ()).throw(AssertionError("updated")))
+    assert cli.main(["--browser", "none", "-y", "https://youtu.be/x"]) == 1
+
+
+def test_resolution_validation():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["--resolution", "hd"])
+    assert cli.build_parser().parse_args(["--resolution", "1080p"]).resolution == "1080"
+
+
+def test_local_file_is_transcribed_in_place(monkeypatch, tmp_path, capsys):
+    import json
+
+    f = tmp_path / "Talk [abcdefghijk].m4a"
+    f.write_bytes(b"")
+    fake = _fake(monkeypatch, _info())
+    _no_prompts(monkeypatch)
+    rc = cli.main(["--browser", "none", "-y", "--json", "--lang", "zh", "--backend", "mlx-whisper", str(f)])
+    r = json.loads(capsys.readouterr().out)["results"][0]
+    assert rc == 0 and fake.calls == [] and r["transcript"] == str(tmp_path / "Talk [abcdefghijk].md")
+    assert (tmp_path / "Talk [abcdefghijk].md").read_text().startswith("# Talk\n")

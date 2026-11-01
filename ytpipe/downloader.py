@@ -42,7 +42,9 @@ class Downloader:
         self.browser = None if cookies_file else browser
         self.cookies_file = cookies_file
         self.cookie_source = f"cookies file {cookies_file}" if cookies_file else (f"browser '{browser}'" if browser else "no cookies")
-        base = ["--no-playlist"]
+        # --abort-on-error: yt-dlp's default ignoreerrors='only_download' makes a failed single video
+        # return None instead of raising, which hides the real reason.
+        base = ["--no-playlist", "--abort-on-error"]
         if cookies_file:
             base += ["--cookies", cookies_file]
         elif browser:
@@ -55,12 +57,17 @@ class Downloader:
     def _run(self, url: str, args: list[str]) -> dict:
         with yt_dlp.YoutubeDL(self._opts(args)) as ydl:
             info = ydl.extract_info(url, download=True)
+            if info is None:
+                raise yt_dlp.utils.DownloadError(f"yt-dlp returned no information for {url}")
             return ydl.sanitize_info(info)
 
     # ------------------------------------------------------------------ metadata
     def fetch_info(self, url: str) -> dict:
         with yt_dlp.YoutubeDL(self._opts(["-q", "--skip-download"])) as ydl:
-            return ydl.sanitize_info(ydl.extract_info(url, download=False))
+            info = ydl.extract_info(url, download=False)
+            if info is None:
+                raise yt_dlp.utils.DownloadError(f"yt-dlp returned no information for {url}")
+            return ydl.sanitize_info(info)
 
     @staticmethod
     def available_heights(info: dict) -> list[int]:

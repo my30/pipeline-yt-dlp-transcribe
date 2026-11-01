@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
 import os
 import re
 import shutil
@@ -32,9 +34,17 @@ MODES = [
 ]
 
 
+def _resolution(value: str) -> str:
+    v = value.lower().removesuffix("p")
+    if v == "best" or v.isdigit():
+        return v
+    raise argparse.ArgumentTypeError("use 'best' or a height such as 1080")
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ytpipe", description="Download YouTube media and/or transcribe it locally.")
-    p.add_argument("url", nargs="*", help="YouTube URL(s). Omit to be prompted (loop until 'q').")
+    p.add_argument("url", nargs="*",
+                   help="YouTube URL(s), or local audio/video file(s) to transcribe. Omit to be prompted (loop until 'q').")
     p.add_argument("--mode", choices=[m for m, _ in MODES], help="Skip the mode question.")
     p.add_argument("-d", "--dir", help=f"Output directory (default {DEFAULT_DIR}).")
     p.add_argument("--browser", default="auto",
@@ -42,6 +52,16 @@ def build_parser() -> argparse.ArgumentParser:
                         "'auto' (default) detects installed browsers; or yt-dlp syntax e.g. safari, firefox, brave, "
                         "'chrome:Profile 1'; 'none' to disable.")
     p.add_argument("--cookies", help="Use a Netscape cookies.txt file instead of --browser.")
+    dg = p.add_argument_group("download choices (each one skips a question)")
+    dg.add_argument("--media", choices=["audio", "video"], help="Download audio or video (download/both modes).")
+    dg.add_argument("--audio-format", choices=list(AUDIO_FORMATS),
+                    help="original (no re-encode, default), m4a, mp3, opus, flac, wav. Implies --media audio.")
+    dg.add_argument("--audio-quality", metavar="Q",
+                    help="For lossy re-encodes: 0 (best VBR, default), 320K, 192K, 128K, ...")
+    dg.add_argument("--video-format", choices=list(VIDEO_CONTAINERS),
+                    help="Container: mp4 (default), mkv, webm. Implies --media video.")
+    dg.add_argument("--resolution", type=_resolution, metavar="best|HEIGHT",
+                    help="best, or a height like 2160 / 1080 / 720p (closest available is used). Implies --media video.")
     p.add_argument("--lang", help="Spoken language: en, zh, ja, ... or 'auto'. Default: ask (1=en, 2=zh).")
     p.add_argument("--backend", choices=list(BACKENDS), help="ASR backend (default: best installed for this machine).")
     p.add_argument("--model", help="ASR model name / HF repo (backend specific).")
@@ -54,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "yaml: real frontmatter at the top; none.")
     md.add_argument("--md-template", metavar="FILE|NAME",
                     help=f"Your own Markdown template file, or a built-in name ({', '.join(builtin_templates())}). "
-                         f"Default: {USER_TEMPLATE} if it exists. See --print-template.")
+                         "Default: ~/.config/ytpipe/template.md if it exists. See --print-template.")
     md.add_argument("--md-dir", metavar="DIR",
                     help="Write the .md transcript here (e.g. your vault's inbox) instead of next to the media.")
     md.add_argument("--md-name", choices=["title-id", "title"], default="title-id",
@@ -62,7 +82,16 @@ def build_parser() -> argparse.ArgumentParser:
                          "(falls back to adding [id] if that name is taken).")
     md.add_argument("--print-template", action="store_true",
                     help="Print the built-in template and its placeholders, then exit.")
-    p.add_argument("-y", "--yes", action="store_true", help="Accept every default without prompting.")
+    p.add_argument("-y", "--yes", action="store_true",
+                   help="Never prompt: unanswered questions take their defaults. Automatic when stdin is not a terminal.")
+    ag = p.add_argument_group("scripting / agents")
+    ag.add_argument("--info", action="store_true",
+                    help="Print the video's metadata as JSON (languages, subtitle tracks, resolutions, ...) and exit; "
+                         "downloads nothing.")
+    ag.add_argument("--json", action="store_true",
+                    help="stdout carries only one JSON result document; all progress goes to stderr.")
+    ag.add_argument("--auto-update", action="store_true",
+                    help="With -y: on a 'YouTube changed' error, update yt-dlp and retry without asking.")
     p.add_argument("--yt-dlp-arg", action="append", default=[], metavar="ARG",
                    help="Extra raw yt-dlp flag(s), repeatable, e.g. --yt-dlp-arg=--limit-rate=5M")
     g = p.add_argument_group("yt-dlp updates")
@@ -106,11 +135,29 @@ def load_config(parser: argparse.ArgumentParser, path: Path = CONFIG_FILE) -> di
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Exit codes: 0 = every URL succeeded, 1 = at least one failed, 2 = bad command line."""
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     load_config(parser)
     args = parser.parse_intermixed_args(raw_argv)
+    if not args.yes and not sys.stdin.isatty() and args.url:
+        args.yes = True  # agent / pipe / cron: nobody can answer prompts
     prompts.ASSUME_DEFAULTS = args.yes
+    results: list[dict] = []
+    if not args.json:
+        return _run(args, raw_argv, results)
+    real_stdout = sys.stdout
+    with contextlib.redirect_stdout(sys.stderr):  # yt-dlp & our logs -> stderr, stdout = JSON only
+        try:
+            code = _run(args, raw_argv, results)
+        except Exception as e:
+            code, results = 1, results + [{"status": "error", "error": f"{type(e).__name__}: {e}"}]
+    payload = results if args.info else {"ok": code == 0, "results": results}
+    print(json.dumps(payload, ensure_ascii=False, indent=2), file=real_stdout)
+    return code
+
+
+def _run(args: argparse.Namespace, raw_argv: list[str], results: list[dict]) -> int:
     if args.print_template:
         print(load_template(args) or DEFAULT_TEMPLATE)
         print("<!--\n" + TEMPLATE_HELP + "\n-->")
@@ -137,6 +184,21 @@ def main(argv: list[str] | None = None) -> int:
         browser = None if (args.browser or "").lower() == "none" else args.browser
     dl = Downloader(browser=browser, cookies_file=args.cookies, extra_args=args.yt_dlp_arg)
 
+    if args.info:
+        if not args.url:
+            print("--info needs at least one URL")
+            return 2
+        failed = False
+        for url in args.url:
+            try:
+                results.append(info_summary(dl.fetch_info(url)))
+            except Exception as e:
+                failed = True
+                results.append({"url": url, "status": "error", "error": str(e)})
+        if not args.json:
+            print(json.dumps(results if len(results) > 1 else results[0], ensure_ascii=False, indent=2))
+        return 1 if failed else 0
+
     urls = list(args.url)
     interactive = not urls
     pending = args.resume_url
@@ -148,9 +210,9 @@ def main(argv: list[str] | None = None) -> int:
                 url = input("\nYouTube URL (q to quit, u to update yt-dlp): ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
-                return 0
+                return exit_code(results)
             if url.lower() in ("q", "quit", "exit", ""):
-                return 0
+                return exit_code(results)
             if url.lower() in ("u", "update"):
                 old, new = updater.update()
                 if new != old:
@@ -160,22 +222,28 @@ def main(argv: list[str] | None = None) -> int:
         elif urls:
             url = urls.pop(0)
         else:
-            return 0
+            return exit_code(results)
+        result = {"url": url, "status": "error"}
+        results.append(result)
         try:
             while True:
                 try:
-                    process(url, dl, args)
+                    process(url, dl, args, result)
+                    result["status"] = "ok"
                     break
                 except CookieLoadError as e:
                     print(f"\nCould not load cookies from {dl.cookie_source}: {e}")
                     new = recover_cookies(dl, args)
                     if new is None:
+                        result["error"] = f"CookieLoadError: {e}"
                         break
                     dl = new
         except KeyboardInterrupt:
             print("\nCancelled.")
+            result["error"] = "cancelled"
         except DownloadError as e:
             print(f"\nyt-dlp error: {e}")
+            result["error"] = str(e)
             if updater.looks_like_breakage(str(e)) and offer_update_and_retry(url, urls, raw_argv, args):
                 continue
             if "members" in str(e).lower() or "sign in" in str(e).lower() or "join this channel" in str(e).lower():
@@ -183,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
                       f"(currently {dl.cookie_source}), or restart with --browser <name> / --cookies cookies.txt.")
         except Exception as e:  # keep the loop alive for the next URL
             print(f"\nError: {type(e).__name__}: {e}")
+            result["error"] = f"{type(e).__name__}: {e}"
 
 
 # ---------------------------------------------------------------------------- updates
@@ -207,6 +276,9 @@ def restart_args(raw_argv: list[str], args: argparse.Namespace, remaining_urls: 
 
 
 def offer_update_and_retry(url: str, remaining: list[str], raw_argv: list[str], args: argparse.Namespace) -> bool:
+    if prompts.ASSUME_DEFAULTS and not args.auto_update:
+        print("Looks like yt-dlp may be outdated. Re-run with --auto-update, or run: ytpipe --update")
+        return False
     cur = updater.installed_version()
     latest = updater.latest_on_pypi(nightly=updater.channel() == "nightly", use_cache=False)
     if latest and not updater.is_newer(latest, cur):
@@ -275,33 +347,46 @@ def recover_cookies(dl: Downloader, args: argparse.Namespace) -> Downloader | No
 
 # ---------------------------------------------------------------------------- one URL
 
-def process(url: str, dl: Downloader, args: argparse.Namespace) -> None:
+def process(url: str, dl: Downloader, args: argparse.Namespace, result: dict | None = None) -> dict:
+    result = {} if result is None else result
+    local = Path(url).expanduser()
+    if local.is_file():
+        return process_local_file(local, args, result)
     print("Fetching video info ...")
     info = dl.fetch_info(url)
+    result.update(id=info.get("id"), title=info.get("title"))
     if info.get("_type") == "playlist":
         raise RuntimeError("Playlists aren't supported yet; pass a single video URL.")
     dur = info.get("duration")
     print(f"\n  {info.get('title')}\n  {info.get('channel') or info.get('uploader')}"
-          + (f" | {int(dur // 60)}m{int(dur % 60):02d}s" if dur else "")
+          + (f" | {fmt_duration(dur)}" if dur else "")
           + (f" | {info['availability']}" if info.get("availability") not in (None, "public") else ""))
 
     mode = args.mode or prompts.choose("\nWhat do you want to do?", MODES, "transcribe")
+    result["mode"] = mode
 
     # ---- download choices
     media = audio_fmt = quality = container = None
     height = None
     if mode in ("download", "both"):
-        media = prompts.choose("\nDownload audio or video?", [("audio", "Audio"), ("video", "Video")], "audio")
+        media = implied_media(args) or prompts.choose(
+            "\nDownload audio or video?", [("audio", "Audio"), ("video", "Video")], "audio")
         if media == "audio":
-            audio_fmt = prompts.choose("Audio format?", [(k, v[0]) for k, v in AUDIO_FORMATS.items()], "original")
+            audio_fmt = args.audio_format or prompts.choose(
+                "Audio format?", [(k, v[0]) for k, v in AUDIO_FORMATS.items()], "original")
             quality = "0"
             if AUDIO_FORMATS[audio_fmt][2]:
-                quality = prompts.choose("Audio quality?", AUDIO_QUALITIES, "0")
+                quality = args.audio_quality or prompts.choose("Audio quality?", AUDIO_QUALITIES, "0")
         else:
-            container = prompts.choose("Video container?", list(VIDEO_CONTAINERS.items()), "mp4")
+            container = args.video_format or prompts.choose("Video container?", list(VIDEO_CONTAINERS.items()), "mp4")
             heights = Downloader.available_heights(info)
-            opts = [("best", "Best available")] + [(str(h), f"{h}p") for h in heights]
-            pick = prompts.choose("Resolution?", opts, "1080" if 1080 in heights else "best")
+            if args.resolution:
+                pick = args.resolution
+                if pick != "best" and heights and int(pick) not in heights:
+                    print(f"NOTE: {pick}p not offered (have {', '.join(map(str, heights))}); yt-dlp picks the closest.")
+            else:
+                opts = [("best", "Best available")] + [(str(h), f"{h}p") for h in heights]
+                pick = prompts.choose("Resolution?", opts, "1080" if 1080 in heights else "best")
             height = None if pick == "best" else int(pick)
 
     # ---- transcription choices
@@ -325,8 +410,9 @@ def process(url: str, dl: Downloader, args: argparse.Namespace) -> None:
         else:
             media_path = dl.download_video(url, outdir, height, container)
         print(f"\nSaved: {media_path}")
+        result["media"] = str(media_path)
         if mode == "download":
-            return
+            return result
 
     stem = sanitize_filename(f"{info.get('title', 'video')[:150]} [{info['id']}]")
     if track is not None:
@@ -338,15 +424,79 @@ def process(url: str, dl: Downloader, args: argparse.Namespace) -> None:
 
     if lang.startswith("zh"):
         segments, converted = to_simplified(segments)
-        if not converted and track is None:
+        if not converted and track is None and backend in WHISPER_SIZES:
             print("Tip: pip install opencc-python-reimplemented  to force Simplified Chinese output.")
 
     md = write_markdown(segments, info, source, transcript_path(info, stem, outdir, args), language=lang,
                         timestamps=not args.no_timestamps, template=load_template(args),
                         frontmatter=args.frontmatter)
     print(f"\nTranscript: {md}")
+    result.update(transcript=str(md), source=source, language=lang)
     if any(s.end > 0 for s in segments):
-        print(f"Subtitles:  {write_srt(segments, outdir / f'{stem}.srt')}")
+        srt = write_srt(segments, outdir / f"{stem}.srt")
+        print(f"Subtitles:  {srt}")
+        result["srt"] = str(srt)
+    return result
+
+
+def process_local_file(path: Path, args: argparse.Namespace, result: dict) -> dict:
+    """Transcribe an audio/video file that is already on disk (e.g. audio kept after a failed run)."""
+    if args.mode == "download":
+        raise RuntimeError("A local file can only be transcribed (--mode transcribe).")
+    path = path.resolve()
+    info = {"id": path.stem, "title": re.sub(r"\s*\[[\w-]{11}\]$", "", path.stem), "webpage_url": str(path)}
+    result.update(id=info["id"], title=info["title"], mode="transcribe", media=str(path))
+    lang = args.lang or choose_language({})
+    backend, model = choose_asr(lang, args)
+    outdir = Path(args.dir).expanduser().resolve() if args.dir else path.parent
+    outdir.mkdir(parents=True, exist_ok=True)
+    segments, source = transcribe(path, backend, model, lang), f"{backend}:{model}"
+    if lang.startswith("zh"):
+        segments, _ = to_simplified(segments)
+    md = write_markdown(segments, info, source, transcript_path(info, path.stem, outdir, args), language=lang,
+                        timestamps=not args.no_timestamps, template=load_template(args), frontmatter=args.frontmatter)
+    print(f"\nTranscript: {md}")
+    result.update(transcript=str(md), source=source, language=lang)
+    if any(s.end > 0 for s in segments):
+        srt = write_srt(segments, outdir / f"{path.stem}.srt")
+        print(f"Subtitles:  {srt}")
+        result["srt"] = str(srt)
+    return result
+
+
+def exit_code(results: list[dict]) -> int:
+    return 1 if any(r.get("status") != "ok" for r in results) else 0
+
+
+def implied_media(args: argparse.Namespace) -> str | None:
+    if args.media:
+        return args.media
+    if args.video_format or args.resolution:
+        return "video"
+    if args.audio_format or args.audio_quality:
+        return "audio"
+    return None
+
+
+def info_summary(info: dict) -> dict:
+    """What an agent needs to decide on flags, without downloading anything."""
+    track = pick_track(info, "auto")
+    return {
+        "id": info.get("id"),
+        "title": info.get("title"),
+        "channel": info.get("channel") or info.get("uploader"),
+        "url": info.get("webpage_url"),
+        "duration_seconds": info.get("duration"),
+        "upload_date": info.get("upload_date"),
+        "availability": info.get("availability"),
+        "is_live": info.get("is_live"),
+        "spoken_language": original_language(info),
+        "manual_subtitles": sorted(k for k in (info.get("subtitles") or {}) if k != "live_chat"),
+        "auto_caption_original": [k for k in (info.get("automatic_captions") or {}) if k.endswith("-orig")],
+        "best_subtitle_track": {"key": track.key, "kind": track.kind} if track else None,
+        "video_heights": Downloader.available_heights(info),
+        "has_audio": any(f.get("acodec") not in (None, "none") for f in info.get("formats") or []),
+    }
 
 
 LANGS = [("en", "English"), ("zh", "中文 (普通话)"), ("auto", "Auto-detect")]
@@ -381,6 +531,12 @@ def choose_asr(lang: str, args: argparse.Namespace) -> tuple[str, str]:
         default = sizes[1][0] if lang.startswith("yue") else sizes[0][0]
         return backend, prompts.choose("Whisper model size?", sizes, default)
     return backend, default_model(backend)
+
+
+def fmt_duration(seconds: float) -> str:
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h{m:02d}m{s:02d}s" if h else f"{m}m{s:02d}s"
 
 
 def transcript_path(info: dict, stem: str, outdir: Path, args: argparse.Namespace) -> Path:
@@ -452,7 +608,8 @@ def transcribe_temp_audio(dl: Downloader, url: str, outdir: Path, backend: str, 
     try:
         segments = transcribe(audio, backend, model, lang)
     except BaseException:
-        print(f"\nTranscription failed; audio kept at: {audio}")
+        print(f"\nTranscription failed; audio kept at: {audio}\n"
+              f"Retry without re-downloading:  ytpipe --mode transcribe \"{audio}\"")
         raise
     shutil.rmtree(tmp, ignore_errors=True)
     print("Temporary audio removed.")
