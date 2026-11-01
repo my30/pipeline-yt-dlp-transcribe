@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
 import tempfile
@@ -11,7 +12,7 @@ from pathlib import Path
 from yt_dlp.cookies import CookieLoadError
 from yt_dlp.utils import DownloadError, sanitize_filename
 
-from . import __version__, prompts
+from . import __version__, prompts, updater
 from .browsers import BROWSER_HINTS, detect_browsers, diagnose, unsupported_installed
 from .downloader import AUDIO_FORMATS, AUDIO_QUALITIES, VIDEO_CONTAINERS, Downloader
 from .output import Segment, to_simplified, write_markdown, write_srt
@@ -45,13 +46,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-y", "--yes", action="store_true", help="Accept every default without prompting.")
     p.add_argument("--yt-dlp-arg", action="append", default=[], metavar="ARG",
                    help="Extra raw yt-dlp flag(s), repeatable, e.g. --yt-dlp-arg=--limit-rate=5M")
+    g = p.add_argument_group("yt-dlp updates")
+    g.add_argument("--update", action="store_true", help="Upgrade the yt-dlp library (+ yt-dlp-ejs) and exit.")
+    g.add_argument("--channel", choices=["stable", "nightly"],
+                   help="With --update: switch channel. Nightly gets YouTube fixes days earlier; stable is safer.")
+    g.add_argument("--no-update-check", action="store_true", help="Don't check PyPI for a newer yt-dlp at startup.")
+    p.add_argument("--resume-url", help=argparse.SUPPRESS)  # used internally after an update+restart
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_intermixed_args(raw_argv)
     prompts.ASSUME_DEFAULTS = args.yes
+    print(f"ytpipe {__version__} | yt-dlp {updater.installed_version()} ({updater.channel()})")
+    if args.update:
+        updater.update(args.channel)
+        return 0
+    if not (args.no_update_check or args.yes or os.environ.get("YTPIPE_NO_UPDATE_CHECK")):
+        notice = updater.startup_notice()
+        if notice:
+            print(f"NOTE: {notice}")
     if not shutil.which("ffmpeg"):
         print("WARNING: ffmpeg not found - audio extraction/merging will fail. Install: brew install ffmpeg")
     if not shutil.which("deno"):
@@ -67,15 +83,24 @@ def main(argv: list[str] | None = None) -> int:
 
     urls = list(args.url)
     interactive = not urls
+    pending = args.resume_url
     while True:
-        if interactive:
+        if pending:
+            url, pending = pending, None
+        elif interactive:
             try:
-                url = input("\nYouTube URL (q to quit): ").strip()
+                url = input("\nYouTube URL (q to quit, u to update yt-dlp): ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return 0
             if url.lower() in ("q", "quit", "exit", ""):
                 return 0
+            if url.lower() in ("u", "update"):
+                old, new = updater.update()
+                if new != old:
+                    print("Restarting with the new yt-dlp ...")
+                    updater.restart(restart_args(raw_argv, args, []))
+                continue
         elif urls:
             url = urls.pop(0)
         else:
@@ -95,11 +120,58 @@ def main(argv: list[str] | None = None) -> int:
             print("\nCancelled.")
         except DownloadError as e:
             print(f"\nyt-dlp error: {e}")
+            if updater.looks_like_breakage(str(e)) and offer_update_and_retry(url, urls, raw_argv, args):
+                continue
             if "members" in str(e).lower() or "sign in" in str(e).lower() or "join this channel" in str(e).lower():
                 print(f"Hint: log in to YouTube (with the member account) in the browser used for cookies "
                       f"(currently {dl.cookie_source}), or restart with --browser <name> / --cookies cookies.txt.")
         except Exception as e:  # keep the loop alive for the next URL
             print(f"\nError: {type(e).__name__}: {e}")
+
+
+# ---------------------------------------------------------------------------- updates
+
+def restart_args(raw_argv: list[str], args: argparse.Namespace, remaining_urls: list[str], retry: str | None = None) -> list[str]:
+    """Original options (minus URLs / one-shot flags) + what is still to do."""
+    drop = set(args.url) | {"--update"}
+    out, skip = [], False
+    for tok in raw_argv:
+        if skip:
+            skip = False
+            continue
+        if tok in ("--resume-url", "--channel"):
+            skip = True
+            continue
+        if tok in drop or tok.startswith(("--resume-url=", "--channel=")):
+            continue
+        out.append(tok)
+    if retry:
+        out += ["--resume-url", retry]
+    return out + remaining_urls
+
+
+def offer_update_and_retry(url: str, remaining: list[str], raw_argv: list[str], args: argparse.Namespace) -> bool:
+    cur = updater.installed_version()
+    latest = updater.latest_on_pypi(nightly=updater.channel() == "nightly", use_cache=False)
+    if latest and not updater.is_newer(latest, cur):
+        nightly = updater.latest_on_pypi(nightly=True)
+        print(f"This looks like YouTube changed something. You already have the latest {updater.channel()} yt-dlp ({cur}).")
+        if updater.channel() == "stable" and updater.is_newer(nightly, cur) and \
+                prompts.confirm(f"Try the nightly build {nightly}? (fixes often land there first)", False):
+            updater.update("nightly")
+        else:
+            print("Check https://github.com/yt-dlp/yt-dlp/issues for this error; a fix usually lands within days.")
+            return False
+    else:
+        newer = f" ({latest} is available)" if latest else ""
+        if not prompts.confirm(f"This often means yt-dlp is out of date{newer}. Update yt-dlp and retry?", True):
+            return False
+        old, new = updater.update()
+        if new == old:
+            return False
+    print("Restarting with the new yt-dlp ...")
+    updater.restart(restart_args(raw_argv, args, remaining, retry=url))
+    return True  # not reached
 
 
 # ---------------------------------------------------------------------------- cookies

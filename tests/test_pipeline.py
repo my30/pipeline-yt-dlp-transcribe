@@ -270,3 +270,55 @@ def test_choose_asr_defaults_to_installed_recommendation(monkeypatch):
     prompts.ASSUME_DEFAULTS = False
     args = argparse.Namespace(backend=None, model=None)
     assert cli.choose_asr("zh", args) == ("mlx-whisper", "mlx-community/whisper-large-v3-turbo")
+
+
+# ------------------------------------------------------------------ yt-dlp updates
+
+def test_breakage_detection():
+    from ytpipe.updater import looks_like_breakage
+
+    assert looks_like_breakage("ERROR: [youtube] x: nsig extraction failed: Some formats may be missing")
+    assert looks_like_breakage("Requested format is not available. Use --list-formats")
+    assert not looks_like_breakage("Sign in to confirm you're not a bot")  # cookies/IP, not an update
+    assert not looks_like_breakage("Join this channel to get access to members-only content")
+
+
+def test_version_compare():
+    from ytpipe.updater import age_days, is_newer
+
+    assert is_newer("2026.10.29.232701.dev0", "2026.10.26")
+    assert not is_newer("2026.10.26", "2026.10.26") and not is_newer(None, "2026.10.26")
+    assert age_days("2000.01.01") > 9000
+
+
+def test_restart_args_keeps_options_drops_urls():
+    raw = ["--browser", "chrome", "--update", "--channel", "nightly", "https://a", "-d", "/x", "https://b"]
+    args = cli.build_parser().parse_intermixed_args(raw)
+    assert cli.restart_args(raw, args, ["https://b"], retry="https://a") == \
+        ["--browser", "chrome", "-d", "/x", "--resume-url", "https://a", "https://b"]
+
+
+def test_breakage_offers_update_and_restarts(monkeypatch, tmp_path):
+    from yt_dlp.utils import DownloadError
+    from ytpipe import updater
+
+    class D:
+        cookie_source = "x"
+
+        def __init__(self, **kw):
+            pass
+
+        def fetch_info(self, url):
+            raise DownloadError("ERROR: [youtube] abc: nsig extraction failed")
+
+    restarted = {}
+    monkeypatch.setattr(cli, "Downloader", D)
+    monkeypatch.setattr(updater, "installed_version", lambda: "2026.01.01")
+    monkeypatch.setattr(updater, "latest_on_pypi", lambda **kw: "2026.10.26")
+    monkeypatch.setattr(updater, "update", lambda target=None: ("2026.01.01", "2026.10.26"))
+    monkeypatch.setattr(updater, "restart", lambda a: restarted.setdefault("argv", a))
+    it = iter(["https://youtu.be/abc", "y", "q"])
+    monkeypatch.setattr("builtins.input", lambda *_: next(it))
+    prompts.ASSUME_DEFAULTS = False
+    assert cli.main(["--browser", "none", "-d", str(tmp_path)]) == 0
+    assert restarted["argv"] == ["--browser", "none", "-d", str(tmp_path), "--resume-url", "https://youtu.be/abc"]

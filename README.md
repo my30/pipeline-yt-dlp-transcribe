@@ -54,6 +54,19 @@ If loading cookies fails you get a menu: retry, another browser, a `cookies.txt`
 - **Arc / Orion / others**: yt-dlp can't read them. Export with a "Get cookies.txt LOCALLY" extension while on youtube.com, then `--cookies ~/yt-cookies.txt`.
   Treat that file like a password. YouTube rotates cookies, so export from a private window that you then close, or re-export when it stops working.
 
+## Keeping yt-dlp current
+
+YouTube changes often; old yt-dlp versions break. `yt-dlp -U` doesn't work for pip installs, so ytpipe
+upgrades the library with this venv's pip (including `yt-dlp-ejs`, the JS-challenge solver) and restarts itself.
+
+- Startup: one-line notice if PyPI has a newer version (checked at most once a day; `--no-update-check` to skip).
+- At the URL prompt type `u` to update now.
+- If a download fails with a typical "YouTube changed" error, ytpipe offers *update and retry* (same URL, same options).
+  Bot-check / members-only errors are cookie or IP problems and are not treated as update-worthy.
+- `ytpipe --update` · `ytpipe --update --channel nightly` (fixes land days earlier) · `--channel stable` to go back.
+- Every update prints the exact pip command to roll back.
+- Also keep deno current: `brew upgrade deno`.
+
 ## ASR backends
 
 The engine menu is ranked for the spoken language you pick (1 = en, 2 = zh, 3 = auto, or type a code).
