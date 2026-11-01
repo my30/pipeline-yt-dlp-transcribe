@@ -31,8 +31,23 @@ Flow for each URL:
    Machine-translated caption tracks are flagged and not used by default.
 5. Output directory (default `~/Downloads/yt-dlp`).
 
-Outputs: `Title [id].<ext>` media, `Title [id].md` (metadata header + paragraphs with `[hh:mm:ss]` stamps),
-`Title [id].srt`.
+Outputs: `Title [id].<ext>` media, `Title [id].md`, `Title [id].srt`.
+
+### Markdown format / your own template
+
+By default the `.md` is plain, tool-neutral Markdown: title, a metadata table, the transcript
+(`[hh:mm:ss]` per paragraph), and at the end an **Obsidian frontmatter suggestion in a ```yaml code block**
+that you can copy to the top of a note. Values are quoted so titles with `:` `#` `"` stay valid YAML.
+
+- `--frontmatter yaml` puts real frontmatter at the top; `--frontmatter none` drops it.
+- Use your own template: save it as `~/.config/ytpipe/template.md` (picked up automatically) or pass `--md-template FILE`.
+  `ytpipe --print-template` shows the built-in one and all placeholders (`${title}`, `${url}`, `${transcript}`,
+  `${frontmatter_yaml}`, ...). Obsidian/Templater syntax like `{{date}}` or `<% %>` passes through untouched;
+  write `$$` for a literal `$`.
+
+```bash
+ytpipe --print-template > ~/.config/ytpipe/template.md   # then edit
+```
 
 Non-interactive examples:
 

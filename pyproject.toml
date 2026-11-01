@@ -16,7 +16,7 @@ dependencies = ["yt-dlp[default]>=2025.11.12"]
 mac = ["mlx-whisper>=0.4", "opencc-python-reimplemented"]
 cpu = ["faster-whisper>=1.1", "opencc-python-reimplemented"]
 funasr = ["funasr>=1.2", "torch", "torchaudio", "opencc-python-reimplemented"]
-dev = ["pytest"]
+dev = ["pytest", "pyyaml"]
 
 [project.scripts]
 ytpipe = "ytpipe.cli:main"

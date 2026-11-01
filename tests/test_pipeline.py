@@ -322,3 +322,49 @@ def test_breakage_offers_update_and_restarts(monkeypatch, tmp_path):
     prompts.ASSUME_DEFAULTS = False
     assert cli.main(["--browser", "none", "-d", str(tmp_path)]) == 0
     assert restarted["argv"] == ["--browser", "none", "-d", str(tmp_path), "--resume-url", "https://youtu.be/abc"]
+
+
+# ------------------------------------------------------------------ markdown templates
+
+from ytpipe.output import render_markdown  # noqa: E402
+
+_SEGS = [Segment(0, 2, "第一句。"), Segment(10, 12, "第二段。")]
+_INFO = {"title": 'AI: "未来" | #1', "channel": "$HOME Channel", "id": "abc", "upload_date": "20260102",
+         "duration": 3725, "webpage_url": "https://youtu.be/abc"}
+
+
+def _yaml_from_codeblock(md):
+    import re
+    import yaml
+
+    block = re.search(r"```yaml\n---\n(.*?)\n---\n```", md, re.S).group(1)
+    return yaml.safe_load(block)
+
+
+def test_default_is_generic_markdown_with_suggested_frontmatter():
+    md = render_markdown(_SEGS, _INFO, "src", language="zh")
+    assert not md.startswith("---")  # no real frontmatter
+    assert md.startswith('# AI: "未来" | #1')
+    assert "| Channel | $HOME Channel |" in md  # '$' in values is not re-substituted
+    assert "[00:00:10] 第二段。" in md
+    fm = _yaml_from_codeblock(md)  # tricky title must survive as valid YAML
+    assert fm["title"] == 'AI: "未来" | #1' and str(fm["upload_date"]) == "2026-01-02" and fm["language"] == "zh"
+
+
+def test_frontmatter_yaml_and_none_modes():
+    md = render_markdown(_SEGS, _INFO, "src", frontmatter="yaml")
+    assert md.startswith("---\ntitle:") and "```yaml" not in md
+    md = render_markdown(_SEGS, _INFO, "src", frontmatter="none")
+    assert "```" not in md and not md.rstrip().endswith("---")
+
+
+def test_custom_template_keeps_obsidian_syntax():
+    tpl = "---\naliases: [${id}]\nsource: ${url}\ncreated: {{date}}\n---\n# ${title}\nCost $$5 ${unknown}\n\n${transcript}\n"
+    md = render_markdown(_SEGS, _INFO, "src", template=tpl, timestamps=False)
+    assert md.startswith("---\naliases: [abc]\nsource: https://youtu.be/abc\ncreated: {{date}}")
+    assert "Cost $5 ${unknown}" in md and "第一句。第二段。" not in md and "第二段。" in md and "[00:" not in md
+
+
+def test_missing_template_fails_fast(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        cli.main(["--md-template", str(tmp_path / "nope.md"), "https://youtu.be/x"])

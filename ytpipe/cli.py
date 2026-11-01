@@ -15,11 +15,12 @@ from yt_dlp.utils import DownloadError, sanitize_filename
 from . import __version__, prompts, updater
 from .browsers import BROWSER_HINTS, detect_browsers, diagnose, unsupported_installed
 from .downloader import AUDIO_FORMATS, AUDIO_QUALITIES, VIDEO_CONTAINERS, Downloader
-from .output import Segment, to_simplified, write_markdown, write_srt
+from .output import DEFAULT_TEMPLATE, TEMPLATE_HELP, Segment, to_simplified, write_markdown, write_srt
 from .subtitles import Track, original_language, parse_vtt, pick_track
 from .transcribe import BACKENDS, WHISPER_SIZES, default_model, installed, recommendations, transcribe
 
 DEFAULT_DIR = "~/Downloads/yt-dlp"
+USER_TEMPLATE = Path("~/.config/ytpipe/template.md").expanduser()
 MODES = [
     ("download", "Download only (audio or video)"),
     ("transcribe", "Transcribe only (temporary audio is deleted afterwards)"),
@@ -43,6 +44,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--subs", choices=["ask", "prefer", "never"], default="ask",
                    help="Use YouTube subtitles when available instead of local ASR (default: ask).")
     p.add_argument("--no-timestamps", action="store_true", help="No [hh:mm:ss] paragraph stamps in the .md transcript.")
+    md = p.add_argument_group("markdown output")
+    md.add_argument("--frontmatter", choices=["suggest", "yaml", "none"], default="suggest",
+                    help="suggest (default): generic Markdown + an Obsidian frontmatter code block to copy; "
+                         "yaml: real frontmatter at the top; none.")
+    md.add_argument("--md-template", metavar="FILE",
+                    help=f"Your own Markdown template (default: {USER_TEMPLATE} if it exists). See --print-template.")
+    md.add_argument("--print-template", action="store_true",
+                    help="Print the built-in template and its placeholders, then exit.")
     p.add_argument("-y", "--yes", action="store_true", help="Accept every default without prompting.")
     p.add_argument("--yt-dlp-arg", action="append", default=[], metavar="ARG",
                    help="Extra raw yt-dlp flag(s), repeatable, e.g. --yt-dlp-arg=--limit-rate=5M")
@@ -60,6 +69,11 @@ def main(argv: list[str] | None = None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_intermixed_args(raw_argv)
     prompts.ASSUME_DEFAULTS = args.yes
+    if args.print_template:
+        print(DEFAULT_TEMPLATE)
+        print("<!--\n" + TEMPLATE_HELP + "\n-->")
+        return 0
+    load_template(args)  # fail now, not after a 20-minute transcription
     print(f"ytpipe {__version__} | yt-dlp {updater.installed_version()} ({updater.channel()})")
     if args.update:
         updater.update(args.channel)
@@ -285,7 +299,9 @@ def process(url: str, dl: Downloader, args: argparse.Namespace) -> None:
         if not converted and track is None:
             print("Tip: pip install opencc-python-reimplemented  to force Simplified Chinese output.")
 
-    md = write_markdown(segments, info, source, outdir / f"{stem}.md", timestamps=not args.no_timestamps)
+    md = write_markdown(segments, info, source, outdir / f"{stem}.md", language=lang,
+                        timestamps=not args.no_timestamps, template=load_template(args),
+                        frontmatter=args.frontmatter)
     print(f"\nTranscript: {md}")
     if any(s.end > 0 for s in segments):
         print(f"Subtitles:  {write_srt(segments, outdir / f'{stem}.srt')}")
@@ -323,6 +339,15 @@ def choose_asr(lang: str, args: argparse.Namespace) -> tuple[str, str]:
         default = sizes[1][0] if lang.startswith("yue") else sizes[0][0]
         return backend, prompts.choose("Whisper model size?", sizes, default)
     return backend, default_model(backend)
+
+
+def load_template(args: argparse.Namespace) -> str | None:
+    path = Path(args.md_template).expanduser() if args.md_template else USER_TEMPLATE
+    if path.is_file():
+        return path.read_text(encoding="utf-8")
+    if args.md_template:
+        raise FileNotFoundError(f"Template not found: {path}")
+    return None
 
 
 def choose_subtitle_track(info: dict, lang: str, policy: str) -> Track | None:
